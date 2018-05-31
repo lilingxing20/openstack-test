@@ -3,26 +3,29 @@
 # set -x
 
 # nova boot vm1 --flavor 2 --image redhat7.2 --nic net-name=net125,v4-fixed-ip=172.30.125.102 --nic net-name=net10 --availability-zone nova:compute03 --key-name key26
-VM_UUID=$1
-vm_name=$1
+COMPUTENAME=$1
+VM_UUID=${COMPUTENAME}_vm
+vm_name=${COMPUTENAME}_vm
 FLAVOR=$2
 IMAGE=$3
 NETNAME=$4
 ZONENAME=$5
-COMPUTENAME=$6
 KEYNAME=$7
 
-FLAVOR=2
-IMAGE='redhat7.2'
+FLAVOR=1
+RESIZE_FLAVOR=2
+IMAGE='cirros'
 #NETNAME='net125;net10'
 NETNAME='net125'
 ZONENAME='nova'
-COMPUTENAME='compute01'
+#COMPUTENAME='compute01'
 KEYNAME='key26'
 attach_net_id='0cd36db1-b06f-4a2c-be0a-4bb5d678a065'
 
 # boot timeout minutes/2
-BOOT_TIMEOUT_M=10
+BOOT_TIMEOUT_M=2
+RESIZE_TIMEOUT_M=2
+MIGRATE_TIMEOUT_M=2
 
 function record_info_log(){
     now_time=$(date  "+%Y%m%d-%H:%M:%S")
@@ -97,7 +100,7 @@ function check_vm_state_timeout(){
     local vm_uuid=$1
     for i in `seq $BOOT_TIMEOUT_M`
     do
-        sleep 30
+        sleep 10
         vm_state=$(get_vm_status ${vm_uuid})
         case $vm_state in
         'ACTIVE_Running')
@@ -176,6 +179,7 @@ function delete_test_volume(){
 function check_vm_attach_volume(){
     local vm_uuid=$1
     local volume_id=$2
+    sleep 5
     local ret=$(nova volume-attachments ${vm_uuid} | grep ${volume_id})
     if [ "$?" == "0" ]
     then
@@ -209,6 +213,127 @@ function attach_volume(){
     echo $volume_id
 }
 
+function check_vm_detach_volume(){
+    local vm_uuid=$1
+    local volume_id=$2
+    sleep 5
+    local ret=$(nova volume-attachments ${vm_uuid} | grep ${volume_id})
+    if [ "$ret" == "" ]
+    then
+        record_info_log "detach volume($volume_id) for vm $vm_uuid succeeded."
+    else
+        record_error_log "detach volume($volume_id) for vm $vm_uuid failed: $ret"
+    fi
+}
+
+function detach_volume(){
+    local vm_uuid=$1
+    #local volume_id=$(create_test_volume 'use_test_vm_attach_volume')
+    test -z "$volume_id" && return
+    local ret=$(nova volume-detach ${vm_uuid} ${volume_id})
+    if [ "$?" == "0" ]
+    then
+        record_info_log "detaching volume($volume_id) for vm $vm_uuid"
+        check_vm_detach_volume $vm_uuid $volume_id
+    else
+        record_error_log "detaching volume($volume_id) for vm $vm_uuid error !"
+    fi
+    echo $volume_id
+}
+
+function check_vm_resize_state_timeout(){
+    local vm_uuid=$1
+    for i in `seq $RESIZE_TIMEOUT_M`
+    do
+        sleep 10
+        vm_state=$(get_vm_status ${vm_uuid})
+        case $vm_state in
+        'VERIFY_RESIZE_Running')
+            echo  0
+            return
+        ;;
+        'ERROR_NOSTATE')
+            echo 1
+            return
+        ;;
+        '_')
+            echo 2
+            return
+        ;;
+        esac
+    done
+    echo 1
+}
+
+
+function verify_resize_vm(){
+    local vm_uuid=$1
+    local ret=$(nova resize-confirm ${vm_uuid})
+    if [ "$?" == "0" ]
+    then
+        record_info_log "resizing-confirm vm $vm_uuid"
+    else
+        record_error_log "resizing-confirm vm $vm_uuid error !"
+    fi
+
+}
+
+
+function resize_vm(){
+    local vm_uuid=$1
+    local ret=$(nova resize ${vm_uuid} ${RESIZE_FLAVOR})
+    if [ "$?" == "0" ]
+    then
+        record_info_log "resizing vm $vm_uuid"
+    else
+        record_error_log "resizing vm $vm_uuid error !"
+    fi
+    check_ret=$(check_vm_resize_state_timeout "$vm_uuid")
+    case $check_ret in
+        '0')
+        verify_resize_vm $vm_uuid
+        ;;
+        *)
+        echo "resize $vm_name error"
+        return
+        ;;
+    esac
+
+}
+
+
+
+function get_vm_host(){
+    local vm_uuid=$1
+    local vm_host=$(nova show ${vm_uuid} | grep -w "OS-EXT-SRV-ATTR:host" | head -1|awk '{print $4}' )
+    echo $vm_host
+}
+
+
+function live_migrate_vm(){
+    local vm_uuid=$1
+    migrate_node=$(cat computers | grep -v ${COMPUTENAME}|shuf -n1)
+    local ret=$(nova live-migration $vm_uuid $migrate_node)
+    if [ "$?" == "0" ]
+    then
+        record_info_log "migrating vm $vm_uuid"
+    else
+        record_error_log "migrating vm $vm_uuid error !"
+    fi
+    check_ret=$(check_vm_state_timeout "$vm_uuid")
+    case $check_ret in
+        '0')
+        echo "migrate $vm_name success"
+        ;;
+        *)
+        echo "resize $vm_name error"
+        return
+        ;;
+    esac
+
+}
+
+
 function test_vm_main(){
     local vm_name=$1
     test -z $vm_name && exit 1
@@ -228,13 +353,22 @@ function test_vm_main(){
     esac
 
     attach_interface $vm_uuid $attach_net_id
-    sleep 10
+    sleep 5
 
     local volume_id=$(attach_volume $vm_uuid)
-    sleep 10
+    sleep 5
+
+    live_migrate_vm $vm_uuid
+    sleep 5
+
+    resize_vm $vm_uuid
+    sleep 5
+
+    local volume_id=$(detach_volume $vm_uuid)
+    sleep 5
 
     delete_vm $vm_uuid
-    sleep 10
+    sleep 5
 
     delete_test_volume $volume_id
 }
