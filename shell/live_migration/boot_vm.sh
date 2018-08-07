@@ -75,7 +75,7 @@ function test_main(){
     test -f $compute_list_file || exit 2
     while read src_node vm_name dest_node
     do
-        # 执行热迁移
+        # 执行创虚机
         # boot_vm $vm $src_node
         echo "vm name: ${vm_name}, in node: $src_node"
     done<$compute_list_file
